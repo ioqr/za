@@ -1,0 +1,11 @@
+.gradle
+build
+.idea
+.metadata
+*.swp
+.DS_Store
+bin
+.project
+worklog
+*.hprof
+.worklog

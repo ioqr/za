@@ -1,0 +1,27 @@
+plugins {
+    id 'application'
+}
+repositories {
+    mavenCentral()
+}
+dependencies {
+    implementation('com.rabbitmq:amqp-client:5.14.2')
+    implementation('org.apache.httpcomponents.client5:httpclient5:5.1')
+    implementation('org.apache.httpcomponents.core5:httpcore5:5.1')
+    implementation('com.fasterxml.jackson.core:jackson-databind:2.13.2')
+    testImplementation('org.junit.jupiter:junit-jupiter:5.8.2')
+    testImplementation('org.mockito:mockito-core:4.4.0')
+}
+application {
+    mainClass = 'za.engine.Main'
+}
+tasks.named('test') {
+    useJUnitPlatform()
+}
+test {
+    testLogging {
+        showStandardStreams = true
+    }
+    enableAssertions = true
+    //outputs.upToDateWhen { false }  // ensure tests always re-run
+}

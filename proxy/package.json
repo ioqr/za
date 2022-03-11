@@ -1,0 +1,10 @@
+{
+    "name": "proxy",
+    "version": "0.1.0",
+    "type": "module",
+    "dependencies": {
+        "express": "^4.17.3",
+        "morgan": "^1.10.0",
+        "node-fetch": "^3.2.3"
+    }
+}

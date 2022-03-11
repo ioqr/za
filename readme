@@ -1,0 +1,20 @@
+
+
+    za                                              (alpha)
+
+
+    example code:
+
+
+        import za.engine.Engine;
+        public static void main(String ... args) {
+            var za = Engine.create(args, new MyPlugin());
+            za.start();
+        }
+
+
+    building za source code:
+
+        # install java 17, then run:
+        ./gradlew build
+        ./run
