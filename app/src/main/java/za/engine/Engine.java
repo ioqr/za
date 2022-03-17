@@ -146,7 +146,7 @@ public final class Engine {
         .map(plugin -> {
             try {
                 var config = configFactory.apply(plugin);
-                var field = plugin.getClass().getField(PLUGIN_CONFIG_FIELD_NAME);
+                var field = Plugin.class.getDeclaredField(PLUGIN_CONFIG_FIELD_NAME);
                 field.setAccessible(true);
                 field.set(plugin, config);
                 field.setAccessible(false);
@@ -165,7 +165,7 @@ public final class Engine {
         var random = new SecureRandom();
         var bytes = new byte[16];  // 128-bit for globally unique ids
         random.nextBytes(bytes);
-        return plugin.getClass() + "_" + new BigInteger(bytes).toString(16);
+        return plugin.getClass().getName() + "_" + new BigInteger(bytes).abs().toString(36);
     }
 
     private BiConsumer<String, Object> getPluginInCallback(Plugin plugin, RabbitMQClient rabbitMQ) {
