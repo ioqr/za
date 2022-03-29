@@ -1,20 +1,16 @@
 package za.engine;
 
-import java.io.IOException;
 import java.math.BigInteger;
 import java.security.SecureRandom;
-import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.TimeoutException;
+import java.util.*;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
+import za.engine.event.EventLoop;
 import za.engine.http.DrainableHttpClient;
 import za.engine.http.HttpClientFactory;
-import za.lib.HttpClient;
+import za.engine.mq.RabbitMQClient;
 import za.lib.Logger;
 import za.lib.Plugin;
 
@@ -26,18 +22,21 @@ public final class Engine {
     private final Logger log;
     private final List<Plugin> plugins;
     private final Supplier<DrainableHttpClient> httpFactory;
-    private final RabbitMQClient.Factory rabbitFactory;
+    private final Supplier<RabbitMQClient> rabbitFactory;
+    private final RegistryImpl registry;
 
     private Engine(
         Logger log,
         List<Plugin> plugins,
         Supplier<DrainableHttpClient> http,         
-        RabbitMQClient.Factory rabbit) {
+        Supplier<RabbitMQClient> rabbit,
+        RegistryImpl registry) {
         this.started = false;
         this.log = log;
         this.plugins = plugins;
         this.httpFactory = http;
         this.rabbitFactory = rabbit;
+        this.registry = registry;
     }
 
     /**
@@ -82,19 +81,20 @@ public final class Engine {
      */
     public static Engine create(Map<String, String> args, Plugin... plugins) throws EngineRuntimeException {
         try {
-            var verbose = Boolean.parseBoolean(args.getOrDefault("logger-verbose", "true"));
             var httpThreads = Integer.parseInt(args.getOrDefault("http-threads", "2"));
             var httpConcurrency = Integer.parseInt(args.getOrDefault("http-concurrency", "32"));
             var rmqUsername = args.getOrDefault("rmq-username", "guest");
             var rmqPassword = args.getOrDefault("rmq-password", "guest");
             var rmqVirtualHost = args.getOrDefault("rmq-virtualhost", "/");
             var rmqHost = args.getOrDefault("rmq-host", "localhost");
-            var rmqPort = Integer.parseInt(args.getOrDefault("rmq-port", "5671"));
+            var rmqPort = Integer.parseInt(args.getOrDefault("rmq-port", "5672"));
             return new Engine(
-                verbose ? Logger.silent() : Logger.verbose(Engine.class),
+                Logger.verbose(Engine.class),
                 List.copyOf(Arrays.asList(plugins)),
-                HttpClientFactory.apache(httpThreads, httpConcurrency, Logger.verbose(HttpClient.class)),
-                RabbitMQClient.factory(rmqUsername, rmqPassword, rmqVirtualHost, rmqHost, rmqPort));
+                HttpClientFactory.remote(),
+                //HttpClientFactory.apache(httpThreads, httpConcurrency, Logger.verbose(HttpClient.class)),
+                RabbitMQClient.factory(rmqUsername, rmqPassword, rmqVirtualHost, rmqHost, rmqPort),
+                new RegistryImpl());
         } catch (Exception e) {
             throw new FailedToCreateEngineException(e); 
         }
@@ -109,36 +109,28 @@ public final class Engine {
             if (plugins.size() == 0) {
                 log.warn("No plugins installed");
             }
-            var registry = new RegistryImpl();
-            var http = httpFactory.get();
-            var rabbit = rabbitFactory.get();
-            log.info("Installing plugins");
+            var eventLoop = new EventLoop("za.i", rabbitFactory, httpFactory, this::onMessage);
+            var http = eventLoop.getHttp();
+            var mq = eventLoop.getMessageQueue();
+            log.info("Installing %d plugins", plugins.size());
             install(plugins, plugin -> {
                 var logger = Logger.verbose(plugin.getClass(), System.out, System.err);
                 var id = genPluginId(plugin);
-                var in = getPluginInCallback(plugin, rabbit);
-                var out = getPluginOutCallback(plugin, rabbit);
+                var in = getPluginInCallback(plugin, mq);
+                var out = getPluginOutCallback(plugin, mq);
                 return new Plugin.Config(logger, registry, http, Map.of(), in, out, id);
             });
             log.info("Enabling plugins");
             plugins.forEach(Plugin::onEnable);
-            log.info("Listening for traffic on queue");
-            var messageHandler = new MessageHandler(registry::getSubscribers);
-            try {
-                rabbit.receiveBlocking(RabbitMQClient.INPUT_QUEUE_NAME, message -> {
-                    messageHandler.handle(message);
-                    try {
-                        http.drainFully();
-                    } catch (InterruptedException e) {
-                        throw new EngineFailedToDrainHttpException(e);
-                    }
-                });
-            } catch (IOException | TimeoutException e) {
-                throw new EngineRuntimeException(e);
-            }
+            eventLoop.run();
         } catch (EngineRuntimeException e) {
             throw new EngineFailedToStartException(e);
         }
+    }
+
+    private void onMessage(MessageHandler.Props message) {
+        log.info("onMessage: %s", message);
+        MessageHandler.dispatch(registry, message);
     }
 
     private void install(List<Plugin> plugins, Function<Plugin, Plugin.Config> configFactory) {
@@ -157,7 +149,7 @@ public final class Engine {
                 return null;
             }
         })
-        .filter(plugin -> plugin != null)
+        .filter(Objects::nonNull)
         .forEach(plugin -> plugin.registry().register(plugin));
     }
     
@@ -168,27 +160,15 @@ public final class Engine {
         return plugin.getClass().getName() + "_" + new BigInteger(bytes).abs().toString(36);
     }
 
-    private BiConsumer<String, Object> getPluginInCallback(Plugin plugin, RabbitMQClient rabbitMQ) {
+    private BiConsumer<String, Object> getPluginInCallback(Plugin plugin, MessageQueue mq) {
         return (channel, message) -> {
-            try {
-                var encoded = MessageHandler.encode("in", channel, plugin, message);
-                rabbitMQ.send(RabbitMQClient.INPUT_QUEUE_NAME, encoded);
-            } catch (Exception e) {
-                log.error("Failed to send input for %s", plugin.id());
-                e.printStackTrace();
-            }
+            mq.send(new MessageHandler.Props("in", channel, plugin.id(), message));
         };
     }
 
-    private BiConsumer<String, Object> getPluginOutCallback(Plugin plugin, RabbitMQClient rabbitMQ) {
+    private BiConsumer<String, Object> getPluginOutCallback(Plugin plugin, MessageQueue mq) {
         return (channel, message) -> {
-            try {
-                var encoded = MessageHandler.encode("out", channel, plugin, message);
-                rabbitMQ.send(RabbitMQClient.OUTPUT_QUEUE_NAME, encoded);
-            } catch (Exception e) {
-                log.error("Failed to send output for %s", plugin.id());
-                e.printStackTrace();
-            }
+            mq.send(new MessageHandler.Props("out", channel, plugin.id(), message));
         };
     }
 

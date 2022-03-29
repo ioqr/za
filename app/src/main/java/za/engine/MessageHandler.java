@@ -1,12 +1,6 @@
 package za.engine;
 
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.Map.Entry;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -17,15 +11,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import za.lib.Logger;
 import za.lib.Message;
-import za.lib.Plugin;
 
-public class MessageHandler {
-    private final Function<String, List<Consumer<Message>>> getSubscribers;
-    private final Logger log = Logger.verbose(getClass());
+public final class MessageHandler {  // TODO rename to MessageEncodingUtils or something like that
+    private MessageHandler() {}
 
-    public MessageHandler(Function<String, List<Consumer<Message>>> getSubscribers) {
-        this.getSubscribers = getSubscribers;
-    }
+    /**
+     * Engine internal message representation
+     * 
+     * note: when receiving messages, the `Object message` is a za.lib.Message
+     */
+    // TODO this should be in its own file
+    public record Props(String context, String channel, String pluginId, Object message) {}
 
     /**
      * Encode a message 
@@ -38,17 +34,22 @@ public class MessageHandler {
      * 1:in:myChannel:MyPlugin_af749dc3:dk:723894573:eyASDFJSONBASE64
      * 1:in:myChannel:MyPlugin_af749dc3::eyASDFJSONBASE64
      */
-    public static String encode(String context, String channel, Plugin plugin, Object message) throws JsonProcessingException {
-        var list = new ArrayList<String>();
-        list.add("1");  // version number
-        list.add(context);
-        list.add(channel);
-        list.add(plugin.id());
-        list.add(encode(message));
-        return String.join(":", list);
+    public static Optional<String> encode(MessageHandler.Props p) {
+        try {
+            var list = new ArrayList<String>();
+            list.add("1");  // version number
+            list.add(p.context());
+            list.add(p.channel());
+            list.add(p.pluginId());
+            list.add(encodeMessageObject(p.message()));
+            return Optional.of(String.join(":", list));
+        } catch (JsonProcessingException e) {
+            e.printStackTrace();
+            return Optional.empty();
+        }
     }
 
-    private static String encode(Object message) throws JsonProcessingException {
+    private static String encodeMessageObject(Object message) throws JsonProcessingException {
         if (message == null) {
             return "null";
         }
@@ -81,23 +82,14 @@ public class MessageHandler {
         return sb.toString();
     }
 
-    /**
-     * Parse and dispatch message
-     */
-    // TODO refactor
-    public void handle(String message) {
+    public static Optional<MessageHandler.Props> decode(String message) {
         try {
             String[] parts = message.split(":");
             String version = parts[0];
             if (!"1".equals(version)) {
-                log.error("Discarding message with version %s", version);
-                return;
+                return Optional.empty();
             }
             String context = parts[1];
-            if (!"in".equals(context)) {
-                log.error("Discarding message with context %s", context);
-                return;
-            }
             String channel = parts[2];
             String pluginId = parts[3];
             String next = parts[4];
@@ -108,25 +100,48 @@ public class MessageHandler {
                 default -> null;
             };
             if (null == body) {
-                log.error("Discarding message with null or unparsable body %s %s", channel, pluginId);
+                return Optional.empty();
             }
             body = new String(Base64.getDecoder().decode(body));
             var mapper = new ObjectMapper();
             var typeRef = new TypeReference<HashMap<String, Object>>() {};
             var parsedMessage = messageFor(mapper.readValue(body, typeRef));
-            getSubscribers.apply(channel).forEach(onMessage -> {
-                onMessage.accept(parsedMessage);
-            });
+            return Optional.of(new Props(context, channel, pluginId, parsedMessage));
         } catch (Exception e) {
-            // TODO what would be good to log here?
-            log.error("Failed to parse message!");
             e.printStackTrace();
+            return Optional.empty();
         }
+    }
+
+    public static void dispatch(RegistryImpl registry, MessageHandler.Props message) {
+        registry.getSubscribers(message.channel()).forEach(onMessage -> {
+            try {
+                onMessage.accept((Message) message.message());
+            } catch (Exception e) {
+                System.err.println("MessageHandler: error in subscriber: " + e);
+                e.printStackTrace();
+            }
+        });
     }
 
     // TODO this is wacky
     private static Message messageFor(HashMap<String, Object> map) {
         return new Message() {
+            @Override
+            public String toString() {
+                return map.toString();
+            }
+
+            @Override
+            public boolean equals(Object obj) {
+                return map.equals(obj);
+            }
+
+            @Override
+            public int hashCode() {
+                return map.hashCode();
+            }
+
             @Override
             public int size() {
                 return map.size();

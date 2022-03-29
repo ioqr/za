@@ -13,7 +13,7 @@ import za.lib.HttpClient;
  * 
  * @since 0.1.0
  */
-public final class RemoteHttpClient implements HttpClient {
+public final class RemoteHttpClient implements DrainableHttpClient {
     public static final String DEFAULT_HOST = "localhost:45678";
     public static final String DEFAULT_PATH = "/za";
 
@@ -67,5 +67,15 @@ public final class RemoteHttpClient implements HttpClient {
 
     private static String base64(String in) {
         return new String(Base64.getEncoder().encode(in.getBytes()));
+    }
+
+    @Override
+    public boolean drain() {
+        return http.drain();
+    }
+
+    @Override
+    public void drainFully() throws InterruptedException {
+        http.drainFully();
     }
 }
