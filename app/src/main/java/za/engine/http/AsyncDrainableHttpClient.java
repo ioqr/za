@@ -44,7 +44,7 @@ public final class AsyncDrainableHttpClient implements DrainableHttpClient, Auto
     /**
      * Enqueues a request (non-blocking)
      * 
-     * @throw RuntimeException if send queue is maxed out
+     * @throws RuntimeException if send queue is maxed out
      */
     @Override
     public void send(Request req, Consumer<Response> next) {
@@ -58,14 +58,8 @@ public final class AsyncDrainableHttpClient implements DrainableHttpClient, Auto
         requestCount++;
     }
 
-    /**
-     * Runtime for HTTP client. Follows these rules:
-     *    - Must be called in same thread as send()
-     *    - Blocking unless thread is interrupted
-     *    - Runs all pending callbacks (maximum = concurrency) before sending new ones
-     */
     @Override
-    public void drainFully() throws InterruptedException {
+    public boolean drain() {
         Consumer<QueueData> callback = qd -> {
             // called in different thread; do not reference any mutable state here!
             try {
@@ -76,42 +70,55 @@ public final class AsyncDrainableHttpClient implements DrainableHttpClient, Auto
                 System.exit(1);
             }
         };
-
-        while (requestCount > 0) {
-            // part 1: drain send queue
-            {
-                int batch = Math.min(sendQueue.size(), concurrency);
-                batch = Math.min(responseQueue.remainingCapacity(), batch);
-                if (batch > 0) {
-                    List<QueueData> qds = new ArrayList<>(batch);
-                    sendQueue.drainTo(qds, batch);
-                    qds.forEach(qd -> {
-                        try {
-                            client.send(qd, callback);
-                            //Thread.sleep(1000L); TODO custom timeout or slow-down logic; should be pluggable
-                        } catch (Exception e) {
-                            // todo put an error into the responsequeue instead
-                            log.error("Dropping request due to exception sending request: %s", qd.getRequest());
-                            e.printStackTrace();
-                            requestCount--;
-                        }
-                    });
-                }
-            }
-            // part 2: drain response queue
-            {
-                List<QueueData> qds = new ArrayList<>(concurrency);
-                responseQueue.drainTo(qds, concurrency /* TODO use a batchSize field instead */);
+        // part 1: drain send queue
+        {
+            int batch = Math.min(sendQueue.size(), concurrency);
+            batch = Math.min(responseQueue.remainingCapacity(), batch);
+            if (batch > 0) {
+                List<QueueData> qds = new ArrayList<>(batch);
+                sendQueue.drainTo(qds, batch);
                 qds.forEach(qd -> {
                     try {
-                        // todo so we could just have one function in AsyncRuntime...
-                        qd.getResponseCallback().accept(qd.getResponse());
+                        client.send(qd, callback);
+                        //Thread.sleep(1000L); TODO custom timeout or slow-down logic; should be pluggable
                     } catch (Exception e) {
+                        // todo put an error into the responsequeue instead
+                        log.error("Dropping request due to exception sending request: %s", qd.getRequest());
                         e.printStackTrace();
-                        log.error("skipping: runtime threw exception for %s: %s", qd, e);
+                        requestCount--;
                     }
                 });
-                requestCount -= qds.size();
+            }
+        }
+        // part 2: drain response queue
+        {
+            List<QueueData> qds = new ArrayList<>(concurrency);
+            responseQueue.drainTo(qds, concurrency /* TODO use a batchSize field instead */);
+            qds.forEach(qd -> {
+                try {
+                    // todo so we could just have one function in AsyncRuntime...
+                    qd.getResponseCallback().accept(qd.getResponse());
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    log.error("skipping: runtime threw exception for %s: %s", qd, e);
+                }
+            });
+            requestCount -= qds.size();
+        }
+        return requestCount > 0;
+    }
+
+    /**
+     * Runtime for HTTP client. Follows these rules:
+     *    - Must be called in same thread as send()
+     *    - Blocking unless thread is interrupted
+     *    - Runs all pending callbacks (maximum = concurrency) before sending new ones
+     */
+    @Override
+    public void drainFully() throws InterruptedException {
+        while (drain()) {
+            if (Thread.interrupted()) {
+                throw new InterruptedException("drainFully() was interrupted");
             }
         }
     }

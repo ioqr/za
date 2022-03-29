@@ -66,28 +66,28 @@ public final class HttpClientFactory {
     /**
      * @see #remote(Logger, DrainableHttpClient, String, String)
      */
-    public static Supplier<HttpClient> remote() {
+    public static Supplier<DrainableHttpClient> remote() {
         return remote(Logger.verbose(HttpClientFactory.class), null, null, null);
     }
 
     /**
      * @see #remote(Logger, DrainableHttpClient, String, String)
      */
-    public static Supplier<HttpClient> remote(Logger log) {
+    public static Supplier<DrainableHttpClient> remote(Logger log) {
         return remote(log, null, null, null);
     }
 
     /**
      * @see #remote(Logger, DrainableHttpClient, String, String)
      */
-    public static Supplier<HttpClient> remote(DrainableHttpClient innerClient) {
+    public static Supplier<DrainableHttpClient> remote(DrainableHttpClient innerClient) {
         return remote(null, innerClient, null, null);
     }
 
     /**
      * @see #remote(Logger, DrainableHttpClient, String, String)
      */
-    public static Supplier<HttpClient> remote(Logger log, DrainableHttpClient innerClient) {
+    public static Supplier<DrainableHttpClient> remote(Logger log, DrainableHttpClient innerClient) {
         return remote(log, innerClient, null, null);
     }
 
@@ -100,7 +100,7 @@ public final class HttpClientFactory {
      * @param path http path of remote service (eg '/my-forwarding-server')
      * @return factory producing remotely-backed drainable http clients
      */
-    public static Supplier<HttpClient> remote(Logger log, DrainableHttpClient innerClient, String host, String path) {
+    public static Supplier<DrainableHttpClient> remote(Logger log, DrainableHttpClient innerClient, String host, String path) {
         return () -> new RemoteHttpClient(
             Optional.ofNullable(innerClient).orElseGet(
                 () -> HttpClientFactory.recommended().get()),

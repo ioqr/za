@@ -1,7 +1,6 @@
 package za.engine.http;
 
 import java.util.function.Consumer;
-
 /**
  * A plugin for AsyncDrainableHttpClient
  * 

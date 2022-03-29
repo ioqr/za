@@ -3,6 +3,7 @@ package za.lib;
 import java.io.PrintStream;
 import java.time.Instant;
 
+// TODO make logger thread safe
 public interface Logger {
     default void info(String fmt, Object... args) {}
     default void warn(String fmt, Object... args) {}
