@@ -10,6 +10,7 @@ import java.util.function.Supplier;
 import za.engine.event.EventLoop;
 import za.engine.http.DrainableHttpClient;
 import za.engine.http.HttpClientFactory;
+import za.engine.mq.MessageClient;
 import za.engine.mq.RabbitMQClient;
 import za.lib.Logger;
 import za.lib.Plugin;
@@ -22,20 +23,20 @@ public final class Engine {
     private final Logger log;
     private final List<Plugin> plugins;
     private final Supplier<DrainableHttpClient> httpFactory;
-    private final Supplier<RabbitMQClient> rabbitFactory;
+    private final Supplier<MessageClient> messageClientFactory;
     private final RegistryImpl registry;
 
-    private Engine(
+    Engine(
         Logger log,
         List<Plugin> plugins,
         Supplier<DrainableHttpClient> http,         
-        Supplier<RabbitMQClient> rabbit,
+        Supplier<MessageClient> messageClientFactory,
         RegistryImpl registry) {
         this.started = false;
         this.log = log;
         this.plugins = plugins;
         this.httpFactory = http;
-        this.rabbitFactory = rabbit;
+        this.messageClientFactory = messageClientFactory;
         this.registry = registry;
     }
 
@@ -92,8 +93,7 @@ public final class Engine {
                 Logger.verbose(Engine.class),
                 List.copyOf(Arrays.asList(plugins)),
                 HttpClientFactory.remote(),
-                //HttpClientFactory.apache(httpThreads, httpConcurrency, Logger.verbose(HttpClient.class)),
-                RabbitMQClient.factory(rmqUsername, rmqPassword, rmqVirtualHost, rmqHost, rmqPort),
+                () -> new RabbitMQClient(rmqUsername, rmqPassword, rmqVirtualHost, rmqHost, rmqPort),
                 new RegistryImpl());
         } catch (Exception e) {
             throw new FailedToCreateEngineException(e); 
@@ -109,15 +109,15 @@ public final class Engine {
             if (plugins.size() == 0) {
                 log.warn("No plugins installed");
             }
-            var eventLoop = new EventLoop("za.i", rabbitFactory, httpFactory, this::onMessage);
+            var eventLoop = new EventLoop("za.i", messageClientFactory, httpFactory, this::onMessage);
             var http = eventLoop.getHttp();
-            var mq = eventLoop.getMessageQueue();
+            MessageListener messageListener = eventLoop.getMessageQueue();
             log.info("Installing %d plugins", plugins.size());
             install(plugins, plugin -> {
                 var logger = Logger.verbose(plugin.getClass(), System.out, System.err);
                 var id = genPluginId(plugin);
-                var in = getPluginInCallback(plugin, mq);
-                var out = getPluginOutCallback(plugin, mq);
+                var in = getPluginInCallback(plugin, messageListener);
+                var out = getPluginOutCallback(plugin, messageListener);
                 return new Plugin.Config(logger, registry, http, Map.of(), in, out, id);
             });
             log.info("Enabling plugins");
@@ -128,9 +128,9 @@ public final class Engine {
         }
     }
 
-    private void onMessage(MessageHandler.Props message) {
-        log.info("onMessage: %s", message);
-        MessageHandler.dispatch(registry, message);
+    private void onMessage(InternalMessage message) {
+        log.info("Received message: %s", message);
+        MessageUtils.dispatch(registry, message);
     }
 
     private void install(List<Plugin> plugins, Function<Plugin, Plugin.Config> configFactory) {
@@ -152,7 +152,7 @@ public final class Engine {
         .filter(Objects::nonNull)
         .forEach(plugin -> plugin.registry().register(plugin));
     }
-    
+
     private String genPluginId(Plugin plugin) {
         var random = new SecureRandom();
         var bytes = new byte[16];  // 128-bit for globally unique ids
@@ -160,15 +160,15 @@ public final class Engine {
         return plugin.getClass().getName() + "_" + new BigInteger(bytes).abs().toString(36);
     }
 
-    private BiConsumer<String, Object> getPluginInCallback(Plugin plugin, MessageQueue mq) {
-        return (channel, message) -> {
-            mq.send(new MessageHandler.Props("in", channel, plugin.id(), message));
+    private BiConsumer<String, Object> getPluginInCallback(Plugin plugin, MessageListener messageListener) {
+        return (String channel, Object message) -> {
+            messageListener.onSend(new InternalMessage(UUID.randomUUID(), "in", channel, plugin.id(), Optional.empty(), message));
         };
     }
 
-    private BiConsumer<String, Object> getPluginOutCallback(Plugin plugin, MessageQueue mq) {
-        return (channel, message) -> {
-            mq.send(new MessageHandler.Props("out", channel, plugin.id(), message));
+    private BiConsumer<String, Object> getPluginOutCallback(Plugin plugin, MessageListener messageListener) {
+        return (String channel, Object message) -> {
+            messageListener.onSend(new InternalMessage(UUID.randomUUID(), "out", channel, plugin.id(), Optional.empty(), message));
         };
     }
 

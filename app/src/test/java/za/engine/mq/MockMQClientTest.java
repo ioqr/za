@@ -5,21 +5,22 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 
 import org.junit.jupiter.api.Test;
 
-import za.engine.MessageHandler;
-import za.engine.MessageQueue;
+import za.engine.InternalMessage;
+import za.engine.MessageListener;
 
 public class MockMQClientTest {
     public static final int WAIT_TIMEOUT_MS = 10000;  // should be long enough to be annoying
 
     @Test
     public void testMockMQClient() throws InterruptedException {
-        MockMQClient client = new MockMQClient();
+        MockMessageClient client = new MockMessageClient();
         // check that mq.send() works out of the box
         try {
             client.send("queueName", "message");
@@ -27,16 +28,18 @@ public class MockMQClientTest {
             fail(e);
         }
         // enqueue some tester messages
-        Map<String, MessageHandler.Props> sharedMap = new ConcurrentHashMap<>();
+        Map<String, InternalMessage> sharedMap = new ConcurrentHashMap<>();
         final int messages = 100;
         for (int i = 0; i < messages; i++) {
             var messageId = "mock-" + UUID.randomUUID();
-            var message = new MessageHandler.Props(
+            var message = new InternalMessage(
+                UUID.randomUUID(),
                 "context-" + messageId,
                 "channel-" + messageId,
                 "pluginId-" + messageId,
+                Optional.of(messageId),
                 Map.of("mock", true, "id", messageId));
-            client.addMockReceivableMessage(messageId, message);
+            client.addMockReceivableMessage(message);
             sharedMap.put(messageId, message);
         }
         var lock = new Object();
@@ -44,7 +47,7 @@ public class MockMQClientTest {
         // test that receiveBlocking will process all enqueued messages
         var thd = new Thread(() -> {
             try {
-                client.receiveBlocking("ignored-queue-name", () -> true, mq::receive);
+                client.receiveBlocking("ignored-queue-name", () -> true, mq::onReceive);
             } catch (IOException | TimeoutException e) {
                 // these exceptions do not occur in the mock implementation
                 fail(e);  // TODO is fail() thread-safe?
@@ -61,15 +64,19 @@ public class MockMQClientTest {
         assertTrue(sharedMap.isEmpty(), "the mq did not receive all mock messages");
     }
 
-    private record MessageQueueImpl(Map<String, MessageHandler.Props> messageMap, Object lock) implements MessageQueue {
+    private record MessageQueueImpl(Map<String, InternalMessage> messageMap, Object lock) implements MessageListener {
         @Override
-        public void send(MessageHandler.Props message) {
+        public void onSend(InternalMessage message) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public void receive(String messageId, MessageHandler.Props receivedMessage) {  // thread-safe
-            var message = messageMap.get(messageId);
+        public void onReceive(InternalMessage receivedMessage) {  // thread-safe
+            if (receivedMessage.messageId().isEmpty()) {
+                throw new IllegalStateException("Message id must not be empty key = " + receivedMessage.key());
+            }
+            String messageId = receivedMessage.messageId().get();
+            InternalMessage message = messageMap.get(messageId);
             if (message == null) {
                 fail("Message with id=" + messageId + " not found in messageMap");
             } else if (!message.equals(receivedMessage)) {

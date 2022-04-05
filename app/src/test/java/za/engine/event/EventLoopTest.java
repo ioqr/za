@@ -9,9 +9,9 @@ import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import za.engine.MessageHandler;
+import za.engine.InternalMessage;
 import za.engine.event.lib.EventedHttpClient;
-import za.engine.event.lib.EventedMessageQueue;
+import za.engine.event.lib.EventedMessageListener;
 import za.engine.http.AsyncDrainableHttpClient;
 import za.engine.http.DrainableHttpClient;
 import za.lib.HttpClient;
@@ -23,9 +23,9 @@ public class EventLoopTest {
     private ConcurrentLinkedQueue<Event> events;
     private DrainableHttpClient mockDrainableHttp;
     private EventedHttpClient mockEventedHttp;
-    private EventedMessageQueue mockEventedMq;
+    private EventedMessageListener mockEventedMq;
     private AsyncMessageQueue mockAsyncMessageQueue;
-    private Consumer<MessageHandler.Props> onMessage;
+    private Consumer<InternalMessage> onMessage;
 
     // the actual event loop to test
     private EventLoop eventLoop;
@@ -36,7 +36,7 @@ public class EventLoopTest {
         events = spy(new ConcurrentLinkedQueue<>());
         mockDrainableHttp = mock(AsyncDrainableHttpClient.class);
         mockEventedHttp = mock(EventedHttpClient.class);
-        mockEventedMq = mock(EventedMessageQueue.class);
+        mockEventedMq = mock(EventedMessageListener.class);
         mockAsyncMessageQueue = mock(AsyncMessageQueue.class);
         onMessage = mock(Consumer.class);
         eventLoop = spy(new EventLoop(mockLog, events, mockDrainableHttp, mockEventedHttp, mockEventedMq, mockAsyncMessageQueue, onMessage));
@@ -92,16 +92,21 @@ public class EventLoopTest {
             eventLoop.processSingleEvent();
         }
         verify(eventLoop, times(trials)).handleHttpSend(any());
-        assertTrue(events.isEmpty());
+        assertEquals(trials, events.size());
+        for (Event event : events.toArray(new Event[trials])) {
+            assertEquals(Events.DRAIN_HTTP, event.type());
+        }
     }
 
     @Test
     public void testReceiveHttpEvents() {
-        var http = new EventedHttpClient(eventLoop);
         final int trials = 10;
         for (int i = 0; i < trials; i++) {
             // TODO use a mock http client to force the receive
-            eventLoop.submit(Events.HTTP_RECEIVE.wrap(mock(EventedHttpClient.ReceiveEventData.class)));
+            EventedHttpClient.ReceiveEventData receiveEventData = mock(EventedHttpClient.ReceiveEventData.class);
+            Consumer<HttpClient.Response> emptyCallback = x -> {};
+            when(receiveEventData.next()).thenReturn(emptyCallback);
+            eventLoop.submit(Events.HTTP_RECEIVE.wrap(receiveEventData));
             assertEquals(i+1, events.size());
         }
         assertEquals(trials, events.size());
@@ -115,10 +120,10 @@ public class EventLoopTest {
 
     @Test
     public void testMessageQueueSendEvents() {
-        var mq = new EventedMessageQueue(eventLoop);
+        var mq = new EventedMessageListener(eventLoop);
         final int trials = 10;
         for (int i = 0; i < trials; i++) {
-            mq.send(mock(MessageHandler.Props.class));
+            mq.onSend(mock(InternalMessage.class));
             assertEquals(i+1, events.size());
         }
         assertEquals(trials, events.size());
@@ -132,10 +137,10 @@ public class EventLoopTest {
 
     @Test
     public void testMessageQueueReceiveEvents() {
-        var mq = new EventedMessageQueue(eventLoop);
+        var mq = new EventedMessageListener(eventLoop);
         final int trials = 10;
         for (int i = 0; i < trials; i++) {
-            mq.receive(new String("some message id"), mock(MessageHandler.Props.class));
+            mq.onReceive(mock(InternalMessage.class));
             assertEquals(i+1, events.size());
         }
         assertEquals(trials, events.size());

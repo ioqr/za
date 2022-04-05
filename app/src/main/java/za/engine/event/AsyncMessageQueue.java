@@ -8,9 +8,10 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
-import za.engine.MessageHandler;
-import za.engine.MessageQueue;
-import za.engine.mq.RabbitMQClient;
+import za.engine.InternalMessage;
+import za.engine.MessageUtils;
+import za.engine.MessageListener;
+import za.engine.mq.MessageClient;
 
 public class AsyncMessageQueue {
     public static final int RECEIVE_LIMIT = 10;  // this determines the engine concurrency (TODO make configurable)
@@ -18,9 +19,9 @@ public class AsyncMessageQueue {
     public static final int SEND_LIMIT = 1000;  // max messages allowed to be queued
     public static final int SEND_CAPACITY = SEND_LIMIT * 4;  // to account for output traffic spikes
 
-    private final MessageQueue receiver;
+    private final MessageListener receiver;
     private final String receiverQueueName;
-    private final Supplier<RabbitMQClient> rabbitMQClientFactory;
+    private final Supplier<MessageClient> messageClientFactory;
     private final String uuid = UUID.randomUUID().toString();
     private final ArrayBlockingQueue<BatchData> batch = new ArrayBlockingQueue<>(SEND_CAPACITY);
 
@@ -29,10 +30,10 @@ public class AsyncMessageQueue {
     private Thread senderThread;
     private final AtomicInteger inFlightMessages = new AtomicInteger();
 
-    public AsyncMessageQueue(MessageQueue receiver, String receiverQueueName, Supplier<RabbitMQClient> rabbitMQClientFactory) {
+    public AsyncMessageQueue(MessageListener receiver, String receiverQueueName, Supplier<MessageClient> messageClientFactory) {
         this.receiver = receiver;
         this.receiverQueueName = receiverQueueName;
-        this.rabbitMQClientFactory = rabbitMQClientFactory;
+        this.messageClientFactory = messageClientFactory;
     }
 
     private record BatchData(String mqChannel, String serializedMessage) {}
@@ -44,26 +45,23 @@ public class AsyncMessageQueue {
         running = true;
         receiverThread = new Thread(() -> {
             try {
-                var rmq = rabbitMQClientFactory.get();
+                var rmq = messageClientFactory.get();
                 rmq.receiveBlocking(
                     receiverQueueName,
                     () -> {
                         // do not increment count here, this function must be a view
                         return inFlightMessages.get() < RECEIVE_LIMIT;
                     },
-                    (String messageId, MessageHandler.Props message) -> {
-                        if (messageId == null) {  // allow messageId to be overridden by an MQClient
-                            messageId = UUID.randomUUID().toString();
-                        }
+                    (InternalMessage message) -> {
                         inFlightMessages.incrementAndGet();
-                        receiver.receive(messageId, message);
+                        receiver.onReceive(message);
                     });
             } catch (Exception e) {
                 throw new RuntimeException(Thread.currentThread().getName() + " failed to receive a message", e);
             }
         }, "AsyncMessageQueue_Receiver_" + uuid);
         senderThread = new Thread(() -> {
-            var rmq = rabbitMQClientFactory.get();
+            var rmq = messageClientFactory.get();
             while (running) {
                 // TODO replace with wait(SENDER_WAIT_TIME_MS) and notify() instead of using interrupt handler
                 try {
@@ -87,8 +85,8 @@ public class AsyncMessageQueue {
         // do not interrupt the autoSendTimer, it will end on its own
     }
     
-    public void sendAsync(MessageHandler.Props message) {
-        var opt = MessageHandler.encode(message);
+    public void sendAsync(InternalMessage message) {
+        var opt = MessageUtils.encode(message);
         if (opt.isPresent()) {
             batch.add(new BatchData(lookupMQChannel(message.context()), opt.get()));
             if (batch.size() >= SEND_LIMIT) {
@@ -102,11 +100,12 @@ public class AsyncMessageQueue {
         }
     }
 
-    public void markReceived(String messageId/*, boolean success*/) {  // TODO need a map of messages to ack / nack
+    public void markReceived(UUID messageKey/*, boolean success*/) {  // TODO need a map of messages to ack / nack
+        // TODO: report engine error if messageKey not found in the map
         inFlightMessages.decrementAndGet();
     }
 
-    private synchronized void threadSafeSendBatch(RabbitMQClient rmq) {  // thread-safe
+    private synchronized void threadSafeSendBatch(MessageClient rmq) {  // thread-safe
         if (this.batch.isEmpty()) {
             return;
         }
