@@ -3,18 +3,16 @@ package za.engine.mq;
 import java.io.IOException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeoutException;
-import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-import za.engine.MessageHandler;
+import za.engine.InternalMessage;
 
-public class MockMQClient implements RabbitMQClient {
-    private final LinkedBlockingQueue<MessageWithId> messages = new LinkedBlockingQueue<>();
+public class MockMessageClient implements MessageClient {
+    private final LinkedBlockingQueue<InternalMessage> messages = new LinkedBlockingQueue<>();
 
-    private record MessageWithId(String id, MessageHandler.Props message) {}
-
-    public void addMockReceivableMessage(String messageId, MessageHandler.Props message) {
-        messages.offer(new MessageWithId(messageId, message));
+    public void addMockReceivableMessage(InternalMessage message) {
+        messages.offer(message);
     }
 
     @Override
@@ -23,7 +21,7 @@ public class MockMQClient implements RabbitMQClient {
     }
 
     @Override
-    public void receiveBlocking(String queueName, Supplier<Boolean> canReceiveMore, BiConsumer<String, MessageHandler.Props> onReceive)
+    public void receiveBlocking(String queueName, Supplier<Boolean> canReceiveMore, Consumer<InternalMessage> onReceive)
     throws InterruptedException, IOException, TimeoutException {
         while (true) {
             if (Thread.interrupted()) {
@@ -33,12 +31,12 @@ public class MockMQClient implements RabbitMQClient {
                 Thread.yield();
                 continue;
             }
-            var mwid = messages.poll();
-            if (mwid == null) {
+            var message = messages.poll();
+            if (message == null) {
                 Thread.yield();
                 continue;
             }
-            onReceive.accept(mwid.id(), mwid.message());
+            onReceive.accept(message);
         }
     }
 }

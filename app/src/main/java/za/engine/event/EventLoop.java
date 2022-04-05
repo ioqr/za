@@ -1,11 +1,11 @@
 package za.engine.event;
 
-import za.engine.MessageHandler;
-import za.engine.MessageQueue;
+import za.engine.InternalMessage;
+import za.engine.MessageListener;
 import za.engine.event.lib.EventedHttpClient;
-import za.engine.event.lib.EventedMessageQueue;
+import za.engine.event.lib.EventedMessageListener;
 import za.engine.http.DrainableHttpClient;
-import za.engine.mq.RabbitMQClient;
+import za.engine.mq.MessageClient;
 import za.lib.HttpClient;
 import za.lib.Logger;
 
@@ -22,7 +22,7 @@ public class EventLoop implements Runnable {
     private final ConcurrentLinkedQueue<Event> events;
     private final DrainableHttpClient http;
     private final AsyncMessageQueue asyncMessageQueue;
-    private final Consumer<MessageHandler.Props> messageSubscriber;
+    private final Consumer<InternalMessage> messageSubscriber;
 
     // metrics (visible to debugger)
     private final AtomicLong submitCalls = new AtomicLong();
@@ -32,21 +32,21 @@ public class EventLoop implements Runnable {
 
     // exported state
     private final EventedHttpClient httpWrapper;
-    private final EventedMessageQueue mqWrapper;
+    private final MessageListener messageListener;
 
     private volatile boolean running = false;
 
     public EventLoop(
             String rmqReceiveQueueName,
-            Supplier<RabbitMQClient> rmqFactory,
+            Supplier<MessageClient> rmqFactory,
             Supplier<DrainableHttpClient> httpFactory,
-            Consumer<MessageHandler.Props> messageSubscriber) {
+            Consumer<InternalMessage> messageSubscriber) {
         this.log = Logger.verbose(EventLoop.class);
         this.events = new ConcurrentLinkedQueue<>();
         this.http = httpFactory.get();
         this.httpWrapper = new EventedHttpClient(this);
-        this.mqWrapper = new EventedMessageQueue(this);
-        this.asyncMessageQueue = new AsyncMessageQueue(this.mqWrapper, rmqReceiveQueueName, rmqFactory);
+        this.messageListener = new EventedMessageListener(this);
+        this.asyncMessageQueue = new AsyncMessageQueue(this.messageListener, rmqReceiveQueueName, rmqFactory);
         this.messageSubscriber = messageSubscriber;
     }
 
@@ -57,14 +57,14 @@ public class EventLoop implements Runnable {
             ConcurrentLinkedQueue<Event> events,
             DrainableHttpClient http,
             EventedHttpClient eventedHttp,
-            EventedMessageQueue eventedMq,
+            EventedMessageListener eventedMessageListener,
             AsyncMessageQueue asyncMessageQueue,
-            Consumer<MessageHandler.Props> messageSubscriber) {
+            Consumer<InternalMessage> messageSubscriber) {
         this.log = log;
         this.events = events;
         this.http = http;
         this.httpWrapper = eventedHttp;
-        this.mqWrapper = eventedMq;
+        this.messageListener = eventedMessageListener;
         this.asyncMessageQueue = asyncMessageQueue;
         this.messageSubscriber = messageSubscriber;
     }
@@ -73,8 +73,8 @@ public class EventLoop implements Runnable {
         return httpWrapper;
     }
 
-    public MessageQueue getMessageQueue() {
-        return mqWrapper;
+    public MessageListener getMessageQueue() {
+        return messageListener;
     }
 
     /**
@@ -168,14 +168,14 @@ public class EventLoop implements Runnable {
 
     // @VisibleForTesting
     void handleMessageQueueSend(Event event) {
-        var data = (EventedMessageQueue.SendEventData) event.data();
+        var data = (EventedMessageListener.SendEventData) event.data();
         asyncMessageQueue.sendAsync(data.message());
     }
 
     // @VisibleForTesting
     void handleMessageQueueReceive(Event e) {
-        var data = (EventedMessageQueue.ReceiveEventData) e.data();
-        asyncMessageQueue.markReceived(data.messageId());
+        var data = (EventedMessageListener.ReceiveEventData) e.data();
+        asyncMessageQueue.markReceived(data.message().key());
         messageSubscriber.accept(data.message());
     }
 

@@ -2,26 +2,15 @@ package za.engine;
 
 import java.util.*;
 import java.util.Map.Entry;
-import java.util.function.Consumer;
-import java.util.function.Function;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import za.lib.Logger;
 import za.lib.Message;
 
-public final class MessageHandler {  // TODO rename to MessageEncodingUtils or something like that
-    private MessageHandler() {}
-
-    /**
-     * Engine internal message representation
-     * 
-     * note: when receiving messages, the `Object message` is a za.lib.Message
-     */
-    // TODO this should be in its own file
-    public record Props(String context, String channel, String pluginId, Object message) {}
+public final class MessageUtils {
+    private MessageUtils() {}
 
     /**
      * Encode a message 
@@ -34,14 +23,14 @@ public final class MessageHandler {  // TODO rename to MessageEncodingUtils or s
      * 1:in:myChannel:MyPlugin_af749dc3:dk:723894573:eyASDFJSONBASE64
      * 1:in:myChannel:MyPlugin_af749dc3::eyASDFJSONBASE64
      */
-    public static Optional<String> encode(MessageHandler.Props p) {
+    public static Optional<String> encode(InternalMessage p) {
         try {
             var list = new ArrayList<String>();
             list.add("1");  // version number
             list.add(p.context());
             list.add(p.channel());
             list.add(p.pluginId());
-            list.add(encodeMessageObject(p.message()));
+            list.add(encodeMessageObject(p.serializableBody()));
             return Optional.of(String.join(":", list));
         } catch (JsonProcessingException e) {
             e.printStackTrace();
@@ -82,8 +71,11 @@ public final class MessageHandler {  // TODO rename to MessageEncodingUtils or s
         return sb.toString();
     }
 
-    public static Optional<MessageHandler.Props> decode(String message) {
+    public static Optional<InternalMessage> decode(UUID internalKey, String messageId, String message) {
         try {
+            Objects.requireNonNull(internalKey);
+            Objects.requireNonNull(messageId);
+            Objects.requireNonNull(message);
             String[] parts = message.split(":");
             String version = parts[0];
             if (!"1".equals(version)) {
@@ -105,28 +97,42 @@ public final class MessageHandler {  // TODO rename to MessageEncodingUtils or s
             body = new String(Base64.getDecoder().decode(body));
             var mapper = new ObjectMapper();
             var typeRef = new TypeReference<HashMap<String, Object>>() {};
-            var parsedMessage = messageFor(mapper.readValue(body, typeRef));
-            return Optional.of(new Props(context, channel, pluginId, parsedMessage));
+            var parsedMessage = messageFor(messageId, mapper.readValue(body, typeRef));
+            return Optional.of(new InternalMessage(internalKey, context, channel, pluginId, Optional.of(messageId), parsedMessage));
         } catch (Exception e) {
             e.printStackTrace();
             return Optional.empty();
         }
     }
 
-    public static void dispatch(RegistryImpl registry, MessageHandler.Props message) {
+    public static void dispatch(RegistryImpl registry, InternalMessage message) {
         registry.getSubscribers(message.channel()).forEach(onMessage -> {
+            if (message.messageId().isEmpty()) {
+                throw new IllegalStateException("Missing message id for message with internal key " + message.key());
+            }
+            if (!(message.serializableBody() instanceof Map)) {
+                throw new IllegalStateException("Body is not a map: message id " + message.messageId().get() + " with internal key " + message.key());
+            }
             try {
-                onMessage.accept((Message) message.message());
+                onMessage.accept(messageFor(message.messageId().get(), (Map) message.serializableBody()));
             } catch (Exception e) {
-                System.err.println("MessageHandler: error in subscriber: " + e);
+                System.err.println("MessageHandler: failed to dispatch message: " + e);
                 e.printStackTrace();
             }
         });
     }
 
     // TODO this is wacky
-    private static Message messageFor(HashMap<String, Object> map) {
+    private static Message messageFor(String messageId, Map<String, Object> inputMap) {
+        Objects.requireNonNull(messageId);
+        Objects.requireNonNull(inputMap);
+        final Map<String, Object> map = Map.copyOf(inputMap);
         return new Message() {
+            @Override
+            public String id() {
+                return messageId;
+            }
+
             @Override
             public String toString() {
                 return map.toString();

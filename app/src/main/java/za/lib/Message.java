@@ -2,4 +2,6 @@ package za.lib;
 
 import java.util.Map;
 
-public interface Message extends Map<String, Object> {}
+public interface Message extends Map<String, Object> {
+    String id();
+}
